@@ -1,6 +1,7 @@
 import { fetchApi } from '@libs/fetch';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
+import { Filters, FilterTypes } from '@libs/filterInputs';
 
 // LNCrawler — https://lncrawler.monster
 // The web frontend is a React SPA; all data comes from its public JSON
@@ -206,9 +207,36 @@ function parseNovelSources(data: unknown): NovelSources {
  * is English). Falls back to the largest source overall when the novel
  * has no English source, so the novel still opens.
  */
-function chooseSource(detail: NovelSources): SourceOption {
+/**
+ * Pick the source the plugin reads through. When the catalog was
+ * filtered to languages, those are carried in the novel path
+ * (`slug?lang=a,b`) and a source in one of them wins — first listed
+ * language first. Without them this is: the English source with the
+ * most available chapters (the site's preferred source wins ties when
+ * it is English), falling back to the largest source overall when the
+ * novel has no English source, so the novel still opens.
+ */
+function chooseSource(
+  detail: NovelSources,
+  preferLangs: string[] = [],
+): SourceOption {
   let bestEn: SourceOption | undefined;
   let bestAny: SourceOption | undefined;
+  for (const lang of preferLangs) {
+    let bestInLang: SourceOption | undefined;
+    for (const s of detail.sources) {
+      if (s.available <= 0 || s.language !== lang) continue;
+      if (
+        !bestInLang ||
+        s.available > bestInLang.available ||
+        (s.available === bestInLang.available &&
+          s.slug === detail.preferredSlug)
+      ) {
+        bestInLang = s;
+      }
+    }
+    if (bestInLang) return bestInLang;
+  }
   for (const s of detail.sources) {
     if (s.available <= 0) continue;
     if (!bestAny || s.available > bestAny.available) bestAny = s;
@@ -304,40 +332,192 @@ function parseChaptersPage(data: unknown): ChaptersPage {
 
 /**
  * Chapter body HTML. The API prefixes the body with an <h1> of the
- * chapter title — the app already shows the title, so it is dropped.
+ * chapter title — which includes the chapter number on LNCrawler.
+ * Keeping it gives in-page headings showing title and number, so it
+ * is left in place (only executable content is stripped below).
  */
 function parseChapterBody(data: unknown): string {
   const res = data as { body?: string };
   if (typeof res.body !== 'string') {
     throw new Error('Chapter response had an unexpected shape');
   }
-  const withoutTitle = res.body
-    .replace(/^\s*<h1\b[^>]*>[\s\S]*?<\/h1>\s*/i, '')
-    .trim();
-  return sanitizeChapterHtml(withoutTitle);
+  return sanitizeChapterHtml(res.body.trim());
 }
+
+/**
+ * Languages the LNCrawler search API understands (from the site's own
+ * frontend), used for the Languages filter. Responses repeat the
+ * `languages` param, which the API aliases to `language`.
+ */
+const LANGUAGES: { label: string; value: string }[] = [
+  { label: 'English', value: 'en' },
+  { label: 'French', value: 'fr' },
+  { label: 'Spanish', value: 'es' },
+  { label: 'German', value: 'de' },
+  { label: 'Italian', value: 'it' },
+  { label: 'Japanese', value: 'ja' },
+  { label: 'Korean', value: 'ko' },
+  { label: 'Chinese', value: 'zh' },
+  { label: 'Portuguese', value: 'pt' },
+  { label: 'Russian', value: 'ru' },
+  { label: 'Arabic', value: 'ar' },
+  { label: 'Hindi', value: 'hi' },
+  { label: 'Thai', value: 'th' },
+  { label: 'Vietnamese', value: 'vi' },
+  { label: 'Indonesian', value: 'id' },
+  { label: 'Turkish', value: 'tr' },
+  { label: 'Polish', value: 'pl' },
+  { label: 'Dutch', value: 'nl' },
+  { label: 'Swedish', value: 'sv' },
+  { label: 'Danish', value: 'da' },
+];
+
+const SORT_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Default', value: '' },
+  { label: 'Title', value: 'title' },
+  { label: 'Rating', value: 'rating' },
+  { label: 'Date added', value: 'date_added' },
+  { label: 'All-time views', value: 'popularity' },
+  { label: 'Trending', value: 'trending' },
+  { label: 'Last updated', value: 'last_updated' },
+];
+
+const STATUS_OPTIONS: { label: string; value: string }[] = [
+  { label: 'All', value: '' },
+  { label: 'Ongoing', value: 'Ongoing' },
+  { label: 'Completed', value: 'Completed' },
+  { label: 'On Hiatus', value: 'On Hiatus' },
+  { label: 'Cancelled', value: 'Cancelled' },
+  { label: 'Unknown', value: 'Unknown' },
+];
+
+const ADULT_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Default', value: '' },
+  { label: 'Hide adult content', value: 'hide' },
+  { label: 'Show everything', value: 'show' },
+  { label: 'Adult content only', value: 'only' },
+];
 
 class LNCrawler implements Plugin.PluginBase {
   id = 'lncrawler';
   name = 'LNCrawler';
   icon = 'src/en/lncrawler/icon.png';
   site = 'https://lncrawler.monster';
-  version = '1.0.1';
+  version = '1.1.1';
 
-  async popularNovels(pageNo: number): Promise<Plugin.NovelItem[]> {
+  filters = {
+    languages: {
+      type: FilterTypes.CheckboxGroup,
+      label: 'Languages',
+      value: ['en'],
+      options: LANGUAGES,
+    },
+    status: {
+      type: FilterTypes.Picker,
+      label: 'Status',
+      value: '',
+      options: STATUS_OPTIONS,
+    },
+    sort_by: {
+      type: FilterTypes.Picker,
+      label: 'Sort by',
+      value: '',
+      options: SORT_OPTIONS,
+    },
+    sort_order: {
+      type: FilterTypes.Picker,
+      label: 'Order',
+      value: '',
+      options: [
+        { label: 'Default', value: '' },
+        { label: 'Ascending', value: 'asc' },
+        { label: 'Descending', value: 'desc' },
+      ],
+    },
+    adult: {
+      type: FilterTypes.Picker,
+      label: 'Adult content',
+      value: '',
+      options: ADULT_OPTIONS,
+    },
+  } satisfies Filters;
+
+  /**
+   * Build the /novels/search/ query from filters. Catalog defaults:
+   * popular = all-time views descending; the Latest toggle switches to
+   * last-updated descending. An empty filter value means "server
+   * default" and is simply omitted.
+   */
+  private buildSearchQuery(
+    options: Plugin.PopularNovelsOptions<typeof this.filters>,
+    pageNo: number,
+    query?: string,
+  ): URLSearchParams {
+    const params = new URLSearchParams({
+      page: String(pageNo),
+      page_size: String(PAGE_SIZE),
+    });
+    if (query) params.set('query', query);
+    const opts: Plugin.PopularNovelsOptions<typeof this.filters> = options || {
+      showLatestNovels: false,
+      filters: undefined,
+    };
+    const filters = opts.filters;
+    if (!filters && !options) {
+      // Interface callers pass no options: catalog default = English.
+      params.append('languages', 'en');
+    } else {
+      for (const language of filters?.languages?.value || []) {
+        if (language) params.append('languages', language);
+      }
+    }
+    if (filters?.status?.value) params.set('status', filters.status.value);
+    if (filters?.sort_by?.value) {
+      params.set('sort_by', filters.sort_by.value);
+    } else {
+      params.set(
+        'sort_by',
+        opts.showLatestNovels ? 'last_updated' : 'popularity',
+      );
+    }
+    if (filters?.sort_order?.value) {
+      params.set('sort_order', filters.sort_order.value);
+    } else {
+      params.set('sort_order', 'desc');
+    }
+    if (filters?.adult?.value) params.set('adult', filters.adult.value);
+    return params;
+  }
+
+  async popularNovels(
+    pageNo: number,
+    options: Plugin.PopularNovelsOptions<typeof this.filters>,
+  ): Promise<Plugin.NovelItem[]> {
     // The search endpoint is the only listing with a language filter;
-    // with no query it serves as the catalog. The API exposes no sort
-    // options, so the Latest toggle lands here too.
+    // with no query it serves as the catalog. Popular = all-time views
+    // descending, the Latest toggle = last-updated descending.
     const data = await fetchJson(
-      `${API}/novels/search/?language=en&page=${pageNo}&page_size=${PAGE_SIZE}`,
+      `${API}/novels/search/?${this.buildSearchQuery(options, pageNo)}`,
       'Failed to load popular novels',
     );
     const page = parseNovelListPage(data);
-    return pageNo > page.totalPages ? [] : page.cards;
+    return this.tagWithLanguages(page, pageNo, options);
+  }
+
+  /** Selected languages carried in the novel path, if any (`slug?lang=a,b`). */
+  private langsFromPath(novelPath: string): string[] {
+    const url = new URL(novelPath, this.site);
+    const raw = url.searchParams.get('lang') || '';
+    return raw.split(',').filter(Boolean);
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const slug = novelPath.replace(/^\/novels\//, '').replace(/\/+$/, '');
+    // The path may be a bare slug (`shadow-slave?lang=en`) or a resolved
+    // site URL (`.../novels/shadow-slave?lang=en`); the last path
+    // segment is the novel slug either way.
+    const slug =
+      new URL(novelPath, this.site).pathname.split('/').filter(Boolean).pop() ||
+      '';
     const detail = parseNovelSources(
       await fetchJson(
         `${API}/novels/${encodeURIComponent(slug)}/`,
@@ -347,7 +527,7 @@ class LNCrawler implements Plugin.PluginBase {
     if (!detail.name) {
       throw new Error('Could not load the novel ' + novelPath);
     }
-    const source = chooseSource(detail);
+    const source = chooseSource(detail, this.langsFromPath(novelPath));
     const base =
       `${API}/novels/${encodeURIComponent(slug)}` +
       `/${encodeURIComponent(source.slug)}`;
@@ -417,13 +597,33 @@ class LNCrawler implements Plugin.PluginBase {
   async searchNovels(
     searchTerm: string,
     pageNo: number,
+    options?: Plugin.PopularNovelsOptions<typeof this.filters>,
   ): Promise<Plugin.NovelItem[]> {
     const data = await fetchJson(
-      `${API}/novels/search/?query=${encodeURIComponent(searchTerm)}&language=en&page=${pageNo}&page_size=${PAGE_SIZE}`,
+      `${API}/novels/search/?${this.buildSearchQuery(options, pageNo, searchTerm)}`,
       'Failed to search novels',
     );
     const page = parseNovelListPage(data);
-    return pageNo > page.totalPages ? [] : page.cards;
+    return this.tagWithLanguages(page, pageNo, options);
+  }
+
+  /**
+   * Catalog cards carry the chosen languages in their path
+   * (`slug?lang=a,b`) so parseNovel can pick a chapter source that
+   * matches them; used only when a language filter is actually set.
+   */
+  private tagWithLanguages(
+    page: ListPage,
+    pageNo: number,
+    options?: Plugin.PopularNovelsOptions<typeof this.filters>,
+  ): Plugin.NovelItem[] {
+    if (pageNo > page.totalPages) return [];
+    const langs = (options?.filters?.languages?.value || [])
+      .filter(Boolean)
+      .join(',');
+    if (!langs) return page.cards;
+    const suffix = `?lang=${encodeURIComponent(langs)}`;
+    return page.cards.map(card => ({ ...card, path: card.path + suffix }));
   }
 
   resolveUrl = (path: string) => {
